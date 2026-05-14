@@ -1,117 +1,13 @@
 use clap::Parser;
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs::{File};
-use std::fmt;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Parser)]
-#[command(name = "api_benchmarker", about = "Analyze JSONL request logs")]
-struct CliOptions {
-    file: PathBuf,
-    #[arg(long, help = "Sort output by: count | mean | p50 | p95 | p99 | max")]
-    sort_by: Option<String>,
-    #[arg(long, help = "Only show routes matching this substring")]
-    filter_route: Option<String>,
-    #[arg(long, help = "Hide routes with fewer than N requests")]
-    min_count: Option<usize>,
-    #[arg(long, help = "Show only the top N routes")]
-    top_n: Option<usize>,
-}
+mod types;
+mod log_parser;
 
-#[derive(Debug, Deserialize)]
-struct LogEntry {
-    route: String,
-    method: String,
-    latency_ms: f64,
-    #[allow(dead_code)]
-    timestamp: String,
-}
-
-impl fmt::Display for LogEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} {} {}", self.route, self.method, self.latency_ms, self.timestamp)
-    }
-}
-
-#[derive(Debug)]
-struct RouteStats {
-    count: usize,
-    min: f64,
-    max: f64,
-    mean: f64,
-    p50: f64,
-    p95: f64,
-    p99: f64,
-}
-
-fn parse_jsonl_chunk(text: &str, line_offset: usize) -> Vec<LogEntry> {
-    let mut out = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let lineno = line_offset + i + 1;
-        match serde_json::from_str::<LogEntry>(line) {
-            Ok(entry) => out.push(entry),
-            Err(e) => eprintln!("line {}: skip ({}): {}", lineno, e, line),
-        }
-    }
-    out
-}
-
-/// Reads only bytes after `*offset`, parses complete newline-terminated lines, advances `*offset`
-/// past consumed bytes. If the file shrinks (rotate/truncate), resets `*offset` to 0.
-fn read_new_log_entries(path: &Path, offset: &mut u64) -> std::io::Result<Vec<LogEntry>> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    if len < *offset {
-        *offset = 0;
-    }
-    if *offset > len {
-        *offset = len;
-    }
-    file.seek(SeekFrom::Start(*offset))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    if buf.is_empty() {
-        return Ok(Vec::new());
-    }
-    let complete_len = match buf.last() {
-        Some(b'\n') => buf.len(),
-        _ => buf
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0),
-    };
-    let mut entries = Vec::new();
-    if complete_len > 0 {
-        let text = std::str::from_utf8(&buf[..complete_len]).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("utf-8: {e}"))
-        })?;
-        entries = parse_jsonl_chunk(text, 0);
-    }
-    let tail = &buf[complete_len..];
-    if !tail.is_empty() {
-        if let Ok(tail_str) = std::str::from_utf8(tail) {
-            let t = tail_str.trim();
-            if !t.is_empty() {
-                if let Ok(entry) = serde_json::from_str::<LogEntry>(t) {
-                    entries.push(entry);
-                    *offset += buf.len() as u64;
-                    return Ok(entries);
-                }
-            }
-        }
-    }
-    *offset += complete_len as u64;
-    Ok(entries)
-}
+use log_parser::LogParser;
+use types::{CliOptions, LogEntry, RouteStats};
 
 fn merge_entries(grouped: &mut HashMap<String, Vec<f64>>, entries: &[LogEntry]) {
     for entry in entries {
@@ -215,11 +111,17 @@ fn render_stats(grouped: &mut HashMap<String, Vec<f64>>, cli: &CliOptions) {
 fn main() {
     let cli = CliOptions::parse();
 
-    let mut offset = 0u64;
     let mut grouped = HashMap::new();
+    let mut parser = match LogParser::open(&cli.file) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("open {:?}: {}", cli.file, e);
+            return;
+        }
+    };
 
     loop {
-        match read_new_log_entries(&cli.file, &mut offset) {
+        match parser.read_new_log_entries() {
             Ok(new) => {
                 if !new.is_empty() {
                     merge_entries(&mut grouped, &new);
