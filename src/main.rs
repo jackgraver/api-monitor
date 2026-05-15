@@ -5,6 +5,7 @@ use std::time::Duration;
 
 mod types;
 mod log_parser;
+mod router_parser;
 
 use log_parser::LogParser;
 use types::{CliOptions, LogEntry, RouteStats};
@@ -109,27 +110,23 @@ fn render_stats(grouped: &mut HashMap<String, Vec<f64>>, cli: &CliOptions) {
 }
 
 fn main() {
-    let cli = CliOptions::parse();
-
-    let mut grouped = HashMap::new();
-    let mut parser = match LogParser::open(&cli.file) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("open {:?}: {}", cli.file, e);
-            return;
-        }
-    };
-
-    loop {
-        match parser.read_new_log_entries() {
-            Ok(new) => {
-                if !new.is_empty() {
-                    merge_entries(&mut grouped, &new);
-                    render_stats(&mut grouped, &cli);
-                }
-            }
-            Err(e) => eprintln!("watch: {}", e),
-        }
-        thread::sleep(Duration::from_millis(1000));
+    let routes = router_parser::find_all_routes("test_api.go");
+    for route in routes {
+        println!("{}\n\n------------------\n", route);
     }
+
+    // loop {
+    //     match parser.read_new_log_entries() {
+    //         Ok(new) => {
+    //             if !new.is_empty() {
+    //                 merge_entries(&mut grouped, &new);
+    //                 render_stats(&mut grouped, &cli);
+    //             }
+    //         }
+    //         Err(e) => eprintln!("watch: {}", e),
+    //     }
+    //     thread::sleep(Duration::from_millis(1000));
+    // }
+
+
 }
