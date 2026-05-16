@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::thread;
@@ -110,10 +112,14 @@ fn render_stats(grouped: &mut HashMap<String, Vec<f64>>, cli: &CliOptions) {
 }
 
 fn main() {
-    let routes = router_parser::find_all_routes("test_api.go");
+    let routes = router_parser::find_all_routes("./data/test_api.go");
     for route in routes {
         println!("{}\n\n------------------\n", route);
     }
+
+    // let mut parser = LogParser::open("data/sample_logs.jsonl").unwrap();
+    // let mut grouped = HashMap::new();
+    // let cli = CliOptions::parse();
 
     // loop {
     //     match parser.read_new_log_entries() {
@@ -127,6 +133,4 @@ fn main() {
     //     }
     //     thread::sleep(Duration::from_millis(1000));
     // }
-
-
 }
