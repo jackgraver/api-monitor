@@ -1,9 +1,36 @@
 use std::{fmt, fs::File, io::{BufRead, BufReader}};
+use std::str::FromStr;
+
+struct Line {
+    content: String,
+    line_number: usize,
+}
+
+impl Line {
+    pub fn new(content: String, line_number: usize) -> Self {
+        Self { content, line_number }
+    }
+}
+
 enum Method {
     GET,
     POST,
     PUT,
     DELETE,
+}
+
+impl FromStr for Method {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "GET" => Ok(Method::GET),
+            "POST" => Ok(Method::POST),
+            "PUT" => Ok(Method::PUT),
+            "DELETE" => Ok(Method::DELETE),
+            _ => Err(()),
+        }
+    }
 }
 
 impl fmt::Display for Method {
@@ -41,18 +68,6 @@ impl Route {
             body_params: Vec::new(),
         }
     }
-
-    pub fn string_to_route_method(method: &str) -> Option<Method> {
-        let method = method.replace("[", "").replace("]", "").to_uppercase();
-
-        match method.as_str() {
-            "GET" => Some(Method::GET),
-            "POST" => Some(Method::POST),
-            "PUT" => Some(Method::PUT),
-            "DELETE" => Some(Method::DELETE),
-            _ => None,
-        }
-    }
 }
 
 
@@ -68,15 +83,21 @@ pub fn find_all_routes(file: &str) -> Vec<Route> {
             let reader = BufReader::new(file);
             let mut routes = Vec::new();
 
-            let mut current_route: Vec<String> = Vec::new();
+            let mut line_count = 0;
+
+            let mut current_route: Vec<Line> = Vec::new();
 
             for line_res in reader.split(b'\n') {
+                line_count += 1;
                 match line_res {
                     Ok(bytes) => {
                         let line = String::from_utf8_lossy(&bytes)
                             .trim_end_matches('\r')
                             .to_string();
-                        if line.is_empty() {
+
+                        let line = Line::new(line, line_count);
+
+                        if line.content.is_empty() {
                             if current_route.is_empty() {
                                 continue;
                             }
@@ -85,7 +106,7 @@ pub fn find_all_routes(file: &str) -> Vec<Route> {
                             current_route.clear();
                             continue;
                         }
-                        if line.starts_with("//") {
+                        if line.content.starts_with("//") {
                             current_route.push(line);
                             continue;
                         }
@@ -105,12 +126,12 @@ pub fn find_all_routes(file: &str) -> Vec<Route> {
     }
 }
 
-fn parse_route(lines: &[String]) -> Route {
+fn parse_route(lines: &[Line]) -> Route {
     let mut route = Route::new();
     println!("Base route? {}", route);
 
     for line in lines {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
+        let parts = line.content.split_whitespace().collect::<Vec<_>>();
 
         let Some(tag) = parts.get(1) else {
             continue;
@@ -118,19 +139,39 @@ fn parse_route(lines: &[String]) -> Route {
 
         match *tag {
             "@Summary" => {
-                if let Some(summary) = parts.get(2) {
-                    route.summary = summary.to_string();
+                match parts.get(2) {
+                    Some(summary) => route.summary = summary.to_string(),
+                    None => {
+                        eprintln!("Summary not found on line {}", line.line_number);
+                        continue;
+                    }
                 }
             }
             "@Route" => {
-                if let Some(path) = parts.get(2) {
-                    route.path = path.to_string();
+                match parts.get(2) {
+                    Some(path) => route.path = path.to_string(),
+                    None => {
+                        eprintln!("Path not found on line {}", line.line_number);
+                        continue;
+                    }
                 }
             }
             "@Method" => {
-                if let Some(method) = parts.get(2) {
-                    if let Some(method) = Route::string_to_route_method(method) {
-                        route.method = method;
+
+                match parts.get(2) {
+                    Some(method) => {
+                        let method = method.replace("[", "").replace("]", "").to_uppercase();
+                        match Method::from_str(&method) {
+                            Ok(method) => route.method = method,
+                            Err(_) => {
+                                eprintln!("Unknown HTTP method on line {}", line.line_number);
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("Method not found on line {}", line.line_number);
+                        continue;
                     }
                 }
             }
