@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use clap::Parser;
+use rusqlite::Connection;
 use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
@@ -111,8 +112,32 @@ fn render_stats(grouped: &mut HashMap<String, Vec<f64>>, cli: &CliOptions) {
     print_table(&results);
 }
 
+
+fn initialize_app_database_connection() -> Option<Connection> {
+    match Connection::open("amon.db") {
+        Ok(conn) => {
+            println!("Database opened successfully");
+            Some(conn)
+        }
+        Err(e) => {
+            eprintln!("Error opening database: {}", e);
+            None
+        }
+    }
+}
+
 fn main() {
-    let routes = router_parser::find_all_routes("./data/test_api.go");
+    // let conn = conn.unwrap();
+    // let route_stmt = "CREATE TABLE IF NOT EXISTS routes (id INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT, path TEXT, method TEXT, query_params TEXT, body_params TEXT)";
+    // let mut create_route_stmt = conn.prepare(route_stmt).unwrap();
+    // create_route_stmt.execute([]).unwrap();
+
+    let Some(conn) = initialize_app_database_connection() else {
+        eprintln!("'Failed' to open database");
+        return;
+    };
+    
+    let routes = router_parser::find_all_routes("./data/test_api.go", &conn);
     for route in routes {
         println!("{}\n\n------------------\n", route);
     }

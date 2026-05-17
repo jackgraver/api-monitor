@@ -1,5 +1,6 @@
 use std::{fmt, fs::File, io::{BufRead, BufReader}};
 use std::str::FromStr;
+use rusqlite::Connection;
 
 struct Line {
     content: String,
@@ -70,18 +71,21 @@ impl Route {
     }
 }
 
-
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.method, self.path)
     }
 }
 
-pub fn find_all_routes(file: &str) -> Vec<Route> {
+pub fn find_all_routes(file: &str, conn: &Connection) -> Vec<Route> {
+    let mut routes = Vec::new();
+
+    let database_routes = load_database_routes(conn);
+    routes.extend(database_routes);
+
     match File::open(file) {
         Ok(file) => {
             let reader = BufReader::new(file);
-            let mut routes = Vec::new();
 
             let mut line_count = 0;
 
@@ -117,6 +121,11 @@ pub fn find_all_routes(file: &str) -> Vec<Route> {
                     }
                 }
             }
+
+            for route in routes.iter() {
+                conn.execute("INSERT INTO routes (summary, path, method) VALUES (?, ?, ?)", (&route.summary, &route.path, &route.method.to_string()));
+            }
+
             routes
         },
         Err(e) => {
@@ -186,4 +195,18 @@ fn parse_route(lines: &[Line]) -> Route {
     }
 
     route
+}
+
+fn load_database_routes(conn: &Connection) -> Vec<Route> {
+    let mut stmt = conn.prepare("SELECT * FROM routes").unwrap();
+    let routes = stmt.query_map([], |row| {
+        Ok(Route {
+            summary: row.get(0)?,
+            path: row.get(1)?,
+            method: row.get(2)?,
+            query_params: row.get(3)?,
+            body_params: row.get(4)?,
+        })
+    }).unwrap().collect();
+    routes
 }
