@@ -138,7 +138,7 @@ fn main() {
         return;
     };
     
-    let routes = router_parser::find_all_routes("./data/test_api.go", &conn);
+    let routes = router_parser::find_all_routes("", &conn);
     if let Err(e) = ui::run(routes) {
         eprintln!("ui: {e}");
     }

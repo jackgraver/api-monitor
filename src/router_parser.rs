@@ -1,9 +1,14 @@
-use std::{fmt, fs::File, io::{BufRead, BufReader}};
+use std::fmt;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::OnceLock;
 
 use regex::Regex;
 use rusqlite::Connection;
+
+const API_PROJECT_ROOT: &str = r"C:\Users\Jacks Desktop\Desktop\Coding\simpletracker";
 
 fn annotation_line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -12,13 +17,14 @@ fn annotation_line_re() -> &'static Regex {
     })
 }
 
+#[derive(Clone)]
 struct Line {
     content: String,
     line_number: usize,
 }
 
 impl Line {
-    pub fn new(content: String, line_number: usize) -> Self {
+    fn new(content: String, line_number: usize) -> Self {
         Self { content, line_number }
     }
 }
@@ -121,70 +127,175 @@ impl fmt::Display for Route {
     }
 }
 
-pub fn find_all_routes(file: &str, conn: &Connection) -> Vec<Route> {
-    let mut routes = Vec::new();
+pub fn find_all_routes(_root_directory: &str, conn: &Connection) -> Vec<Route> {
+    let root = Path::new(API_PROJECT_ROOT);
+    let mut go_files = Vec::new();
+    collect_go_files(root, &mut go_files);
 
-    let database_routes = load_database_routes(conn);
-    routes.extend(database_routes);
-
-    match File::open(file) {
-        Ok(file) => {
-            let reader = BufReader::new(file);
-
-            let mut line_count = 0;
-
-            let mut current_route: Vec<Line> = Vec::new();
-
-            for line_res in reader.split(b'\n') {
-                line_count += 1;
-                match line_res {
-                    Ok(bytes) => {
-                        let line = String::from_utf8_lossy(&bytes)
-                            .trim_end_matches('\r')
-                            .to_string();
-
-                        let line = Line::new(line, line_count);
-
-                        if line.content.is_empty() {
-                            if current_route.is_empty() {
-                                continue;
-                            }
-
-                            routes.push(parse_route(&current_route));
-                            current_route.clear();
-                            continue;
-                        }
-                        if line.content.starts_with("//") {
-                            current_route.push(line);
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading line");
-                        continue;
-                    }
-                }
-            }
-
-            for route in routes.iter() {
-                let method_str = route.method().to_string();
-                let _ = conn.execute(
-                    "INSERT INTO routes (summary, path, method)
-                     SELECT ?1, ?2, ?3
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM routes WHERE path = ?2 AND method = ?3
-                     )",
-                    (route.summary(), route.path(), method_str.as_str()),
-                );
-            }
-
-            routes
-        },
-        Err(e) => {
-            eprintln!("Error opening file");
-            Vec::new()
-        },
+    for path in &go_files {
+        scan_go_file(path, conn);
     }
+
+    load_database_routes(conn)
+}
+
+fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Error reading directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_go_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "go") {
+            out.push(path);
+        }
+    }
+}
+
+fn scan_go_file(path: &Path, conn: &Connection) {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Error opening {}: {}", path.display(), e);
+            return;
+        }
+    };
+
+    let reader = BufReader::new(file);
+    let mut line_count = 0;
+    let mut current_route: Vec<Line> = Vec::new();
+
+    for line_res in reader.split(b'\n') {
+        line_count += 1;
+        let Ok(bytes) = line_res else {
+            eprintln!("Error reading line in {}", path.display());
+            continue;
+        };
+
+        let content = String::from_utf8_lossy(&bytes)
+            .trim_end_matches('\r')
+            .to_string();
+
+        let line = Line::new(content, line_count);
+
+        if line.content.is_empty() {
+            flush_route_block(&mut current_route, conn);
+            continue;
+        }
+
+        if line.content.starts_with("//") {
+            handle_comment_line(&line, conn, &mut current_route);
+            continue;
+        }
+
+        flush_route_block(&mut current_route, conn);
+    }
+
+    flush_route_block(&mut current_route, conn);
+}
+
+fn handle_comment_line(line: &Line, conn: &Connection, current_route: &mut Vec<Line>) {
+    if let Some(controller_name) = parse_controller_annotation(&line.content) {
+        save_controller_if_new(conn, &controller_name);
+        return;
+    }
+
+    if is_route_annotation(&line.content) || !current_route.is_empty() {
+        current_route.push(line.clone());
+    }
+}
+
+fn parse_controller_annotation(content: &str) -> Option<String> {
+    let caps = annotation_line_re().captures(content)?;
+    let annotation = caps.name("annotation")?.as_str();
+    if annotation != "@Controller" {
+        return None;
+    }
+    let name = caps.name("content")?.as_str().trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn is_route_annotation(content: &str) -> bool {
+    let Some(caps) = annotation_line_re().captures(content) else {
+        return false;
+    };
+    let annotation = caps.name("annotation").map(|m| m.as_str()).unwrap_or("");
+    matches!(
+        annotation,
+        "@Summary" | "@Route" | "@Method" | "@Param" | "@Body"
+    )
+}
+
+fn flush_route_block(current_route: &mut Vec<Line>, conn: &Connection) {
+    if current_route.is_empty() {
+        return;
+    }
+
+    let route = parse_route(current_route);
+    current_route.clear();
+
+    if route.path().is_empty() {
+        return;
+    }
+
+    let method_str = route.method().to_string();
+    if route_exists_in_db(conn, route.path(), &method_str) {
+        return;
+    }
+
+    save_route_if_new(conn, &route);
+}
+
+fn route_exists_in_db(conn: &Connection, path: &str, method: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM routes WHERE path = ?1 AND method = ?2",
+        [path, method],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn controller_exists_in_db(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM controllers WHERE name = ?1",
+        [name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn save_controller_if_new(conn: &Connection, name: &str) {
+    if controller_exists_in_db(conn, name) {
+        return;
+    }
+
+    let _ = conn.execute(
+        "INSERT INTO controllers (name)
+         SELECT ?1
+         WHERE NOT EXISTS (SELECT 1 FROM controllers WHERE name = ?1)",
+        [name],
+    );
+}
+
+fn save_route_if_new(conn: &Connection, route: &Route) {
+    let method_str = route.method().to_string();
+    let _ = conn.execute(
+        "INSERT INTO routes (summary, path, method)
+         SELECT ?1, ?2, ?3
+         WHERE NOT EXISTS (
+             SELECT 1 FROM routes WHERE path = ?2 AND method = ?3
+         )",
+        (route.summary(), route.path(), method_str.as_str()),
+    );
 }
 
 fn parse_route(lines: &[Line]) -> Route {
