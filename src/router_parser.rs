@@ -1,6 +1,16 @@
 use std::{fmt, fs::File, io::{BufRead, BufReader}};
 use std::str::FromStr;
+use std::sync::OnceLock;
+
+use regex::Regex;
 use rusqlite::Connection;
+
+fn annotation_line_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*//\s*(?P<annotation>@\w+)\s+(?P<content>.*)$").unwrap()
+    })
+}
 
 struct Line {
     content: String,
@@ -157,7 +167,15 @@ pub fn find_all_routes(file: &str, conn: &Connection) -> Vec<Route> {
             }
 
             for route in routes.iter() {
-                conn.execute("INSERT INTO routes (summary, path, method) VALUES (?, ?, ?)", (&route.summary, &route.path, &route.method.to_string()));
+                let method_str = route.method().to_string();
+                let _ = conn.execute(
+                    "INSERT INTO routes (summary, path, method)
+                     SELECT ?1, ?2, ?3
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM routes WHERE path = ?2 AND method = ?3
+                     )",
+                    (route.summary(), route.path(), method_str.as_str()),
+                );
             }
 
             routes
@@ -171,60 +189,49 @@ pub fn find_all_routes(file: &str, conn: &Connection) -> Vec<Route> {
 
 fn parse_route(lines: &[Line]) -> Route {
     let mut route = Route::new();
-    println!("Base route? {}", route);
+    let re = annotation_line_re();
 
     for line in lines {
-        let parts = line.content.split_whitespace().collect::<Vec<_>>();
-
-        let Some(tag) = parts.get(1) else {
+        let Some(caps) = re.captures(&line.content) else {
             continue;
         };
+        let annotation = caps.name("annotation").map(|m| m.as_str()).unwrap_or("");
+        let content = caps
+            .name("content")
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
 
-        match *tag {
+        match annotation {
             "@Summary" => {
-                match parts.get(2) {
-                    Some(summary) => route.summary = summary.to_string(),
-                    None => {
-                        eprintln!("Summary not found on line {}", line.line_number);
-                        continue;
-                    }
+                if content.is_empty() {
+                    eprintln!("Summary missing on line {}", line.line_number);
+                } else {
+                    route.summary = content.to_string();
                 }
             }
             "@Route" => {
-                match parts.get(2) {
-                    Some(path) => route.path = path.to_string(),
-                    None => {
-                        eprintln!("Path not found on line {}", line.line_number);
-                        continue;
-                    }
+                if content.is_empty() {
+                    eprintln!("Path missing on line {}", line.line_number);
+                } else {
+                    route.path = content.to_string();
                 }
             }
             "@Method" => {
-
-                match parts.get(2) {
-                    Some(method) => {
-                        let method = method.replace("[", "").replace("]", "").to_uppercase();
-                        match Method::from_str(&method) {
-                            Ok(method) => route.method = method,
-                            Err(_) => {
-                                eprintln!("Unknown HTTP method on line {}", line.line_number);
-                                continue;
-                            }
-                        }
-                    }
-                    None => {
-                        eprintln!("Method not found on line {}", line.line_number);
-                        continue;
+                if content.is_empty() {
+                    eprintln!("Method not found on line {}", line.line_number);
+                    continue;
+                }
+                let method = content.replace('[', "").replace(']', "").trim().to_uppercase();
+                match Method::from_str(&method) {
+                    Ok(m) => route.method = m,
+                    Err(_) => {
+                        eprintln!("Unknown HTTP method on line {}", line.line_number);
                     }
                 }
             }
-            "@Param" => {
-            }
-            "@Body" => {
-            }
-            _ => {
-                continue;
-            }
+            "@Param" => {}
+            "@Body" => {}
+            _ => continue,
         }
     }
 
