@@ -13,7 +13,7 @@ impl Line {
     }
 }
 
-enum Method {
+pub enum Method {
     GET,
     POST,
     PUT,
@@ -68,6 +68,14 @@ impl Route {
             query_params: Vec::new(),
             body_params: Vec::new(),
         }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn method(&self) -> &Method {
+        &self.method
     }
 }
 
@@ -198,15 +206,25 @@ fn parse_route(lines: &[Line]) -> Route {
 }
 
 fn load_database_routes(conn: &Connection) -> Vec<Route> {
-    let mut stmt = conn.prepare("SELECT * FROM routes").unwrap();
-    let routes = stmt.query_map([], |row| {
+    let mut stmt = match conn.prepare("SELECT summary, path, method FROM routes") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mapped = stmt.query_map([], |row| {
+        let summary: String = row.get(0)?;
+        let path: String = row.get(1)?;
+        let method_str: String = row.get(2)?;
+        let method = Method::from_str(&method_str).unwrap_or(Method::GET);
         Ok(Route {
-            summary: row.get(0)?,
-            path: row.get(1)?,
-            method: row.get(2)?,
-            query_params: row.get(3)?,
-            body_params: row.get(4)?,
+            summary,
+            path,
+            method,
+            query_params: Vec::new(),
+            body_params: Vec::new(),
         })
-    }).unwrap().collect();
-    routes
+    });
+    match mapped {
+        Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
 }

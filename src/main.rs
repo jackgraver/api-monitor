@@ -9,6 +9,7 @@ use std::time::Duration;
 mod types;
 mod log_parser;
 mod router_parser;
+mod ui;
 
 use log_parser::LogParser;
 use types::{CliOptions, LogEntry, RouteStats};
@@ -138,8 +139,8 @@ fn main() {
     };
     
     let routes = router_parser::find_all_routes("./data/test_api.go", &conn);
-    for route in routes {
-        println!("{}\n\n------------------\n", route);
+    if let Err(e) = ui::run(routes) {
+        eprintln!("ui: {e}");
     }
 
     // let mut parser = LogParser::open("data/sample_logs.jsonl").unwrap();
