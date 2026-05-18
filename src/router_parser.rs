@@ -45,10 +45,24 @@ impl fmt::Display for Method {
     }
 }
 
-struct Param {
+pub struct Param {
     name: String,
     ty: String,
     required: bool,
+}
+
+impl Param {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn ty(&self) -> &str {
+        &self.ty
+    }
+
+    pub fn required(&self) -> bool {
+        self.required
+    }
 }
 
 pub struct Route {
@@ -76,6 +90,18 @@ impl Route {
 
     pub fn method(&self) -> &Method {
         &self.method
+    }
+
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    pub fn query_params(&self) -> &[Param] {
+        &self.query_params
+    }
+
+    pub fn body_params(&self) -> &[Param] {
+        &self.body_params
     }
 }
 

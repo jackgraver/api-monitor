@@ -6,13 +6,14 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, List, ListState};
 use ratatui::Terminal;
 
 use crate::router_parser::Route;
 
-use super::route_list;
+use super::{route_detail, route_list};
 
 pub fn run(routes: Vec<Route>) -> io::Result<()> {
     enable_raw_mode()?;
@@ -43,6 +44,11 @@ fn run_loop(
     loop {
         terminal.draw(|f| {
             let area = f.area();
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+                .split(area);
+
             let items = route_list::list_items(&routes);
             let list = List::new(items)
                 .block(
@@ -51,7 +57,11 @@ fn run_loop(
                         .title(" Routes (q or Esc to quit) "),
                 )
                 .highlight_style(Style::default().bg(Color::DarkGray));
-            f.render_stateful_widget(list, area, &mut list_state);
+            f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+            let selected = list_state.selected().and_then(|i| routes.get(i));
+            let detail = route_detail::detail_paragraph(selected);
+            f.render_widget(detail, chunks[1]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(250))? {

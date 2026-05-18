@@ -1,3 +1,4 @@
+mod route_detail;
 mod route_list;
 pub mod ui_core;
 

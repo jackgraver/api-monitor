@@ -22,7 +22,8 @@ pub fn list_items(routes: &[Route]) -> Vec<ListItem<'static>> {
         })
         .collect()
 }
-fn method_fg(method: &Method) -> ratatui::style::Color {
+
+pub(crate) fn method_fg(method: &Method) -> ratatui::style::Color {
     use ratatui::style::Color;
     match method {
         Method::GET => Color::Green,
