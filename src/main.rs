@@ -128,6 +128,8 @@ fn initialize_app_database_connection() -> Option<Connection> {
 }
 
 fn main() {
+    let _ = dotenvy::dotenv();
+
     // let conn = conn.unwrap();
     // let route_stmt = "CREATE TABLE IF NOT EXISTS routes (id INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT, path TEXT, method TEXT, query_params TEXT, body_params TEXT)";
     // let mut create_route_stmt = conn.prepare(route_stmt).unwrap();

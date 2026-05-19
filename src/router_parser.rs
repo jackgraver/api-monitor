@@ -29,6 +29,7 @@ impl Line {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Method {
     GET,
     POST,
