@@ -1,16 +1,16 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::router_parser::{Param, Route};
 
 use super::route_list::method_fg;
 use super::route_request::{RequestOutcome, RequestState};
 
-const MAX_BODY_DISPLAY: usize = 12_000;
+const MAX_BODY_DISPLAY: usize = 50_000;
 
-pub fn detail_paragraph(route: Option<&Route>, request: &RequestState) -> Paragraph<'static> {
-    let lines: Vec<Line<'static>> = match route {
+pub fn detail_lines(route: Option<&Route>, request: &RequestState) -> Vec<Line<'static>> {
+    match route {
         None => vec![Line::from(vec![Span::styled(
             "(no route selected)",
             Style::default().fg(Color::DarkGray),
@@ -20,14 +20,17 @@ pub fn detail_paragraph(route: Option<&Route>, request: &RequestState) -> Paragr
             append_request_lines(&mut lines, request);
             lines
         }
-    };
+    }
+}
+
+pub fn detail_paragraph(lines: Vec<Line<'static>>, scroll_y: u16) -> Paragraph<'static> {
     Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Detail (Enter to send request) "),
-        )
-        .wrap(Wrap { trim: true })
+        .wrap(Wrap { trim: false })
+        .scroll((0, scroll_y))
+}
+
+pub fn line_count(lines: &[Line], _width: u16) -> u16 {
+    lines.len() as u16
 }
 
 fn build_lines(route: &Route) -> Vec<Line<'static>> {
