@@ -1,19 +1,14 @@
 use std::time::{Duration, Instant};
 
-use reqwest::blocking::Client;
 use reqwest::Method as HttpMethod;
+use reqwest::blocking::{Client, RequestBuilder};
 
+use crate::error::RequestError;
 use crate::router_parser::Method;
 
 const API_BASE: &str = "http://localhost:8080";
 const AUTH_COOKIE_NAME: &str = "auth_token";
-
-fn auth_cookie_header() -> Result<String, String> {
-    let token = std::env::var("AUTH_TOKEN").map_err(|_| {
-        "AUTH_TOKEN is not set. Add it to a .env file in the project root.".to_string()
-    })?;
-    Ok(format!("{AUTH_COOKIE_NAME}={token}"))
-}
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub enum RequestOutcome {
     Success {
@@ -31,39 +26,46 @@ pub enum RequestState {
 }
 
 pub fn send(path: &str, method: &Method) -> RequestOutcome {
-    let cookie = match auth_cookie_header() {
-        Ok(v) => v,
-        Err(e) => return RequestOutcome::Error(e),
-    };
-
-    let url = format!("{API_BASE}{path}");
-    let client = match Client::builder().timeout(Duration::from_secs(30)).build() {
-        Ok(c) => c,
-        Err(e) => return RequestOutcome::Error(e.to_string()),
-    };
-
-    let mut req = client
-        .request(to_http_method(method), &url)
-        .header("Cookie", cookie);
-    if matches!(method, Method::POST | Method::PUT) {
-        req = req
-            .header("Content-Type", "application/json")
-            .body("{}");
-    }
-
-    let started = Instant::now();
-    match req.send() {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body = resp.text().unwrap_or_default();
-            RequestOutcome::Success {
-                status,
-                body,
-                elapsed_ms: started.elapsed().as_millis(),
-            }
-        }
+    match try_send(path, method) {
+        Ok(outcome) => outcome,
         Err(e) => RequestOutcome::Error(e.to_string()),
     }
+}
+
+fn try_send(path: &str, method: &Method) -> Result<RequestOutcome, RequestError> {
+    let cookie = auth_cookie_header()?;
+    let client = Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(RequestError::ClientBuild)?;
+
+    let url = format!("{API_BASE}{path}");
+    let req = build_request(&client, method, &url, &cookie);
+
+    let started = Instant::now();
+    let resp = req.send().map_err(RequestError::Send)?;
+    let status = resp.status().as_u16();
+    let body = resp.text().map_err(RequestError::ReadBody)?;
+    Ok(RequestOutcome::Success {
+        status,
+        body,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn build_request(client: &Client, method: &Method, url: &str, cookie: &str) -> RequestBuilder {
+    let mut req = client
+        .request(to_http_method(method), url)
+        .header("Cookie", cookie);
+    if matches!(method, Method::POST | Method::PUT) {
+        req = req.header("Content-Type", "application/json").body("{}");
+    }
+    req
+}
+
+fn auth_cookie_header() -> Result<String, RequestError> {
+    let token = std::env::var("AUTH_TOKEN").map_err(|_| RequestError::MissingAuthToken)?;
+    Ok(format!("{AUTH_COOKIE_NAME}={token}"))
 }
 
 fn to_http_method(method: &Method) -> HttpMethod {

@@ -30,7 +30,6 @@ enum Focus {
 }
 
 struct LayoutRects {
-    detail: Rect,
     detail_inner_width: u16,
     detail_inner_height: u16,
 }
@@ -97,7 +96,6 @@ impl App {
 
         let detail = detail_chunks[0];
         LayoutRects {
-            detail,
             detail_inner_width: detail.width.saturating_sub(2),
             detail_inner_height: detail.height.saturating_sub(2),
         }

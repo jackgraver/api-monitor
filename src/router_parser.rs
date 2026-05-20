@@ -8,12 +8,11 @@ use std::sync::OnceLock;
 use regex::Regex;
 use rusqlite::Connection;
 
-const API_PROJECT_ROOT: &str = r"C:\Users\Jacks Desktop\Desktop\Coding\simpletracker";
-
 fn annotation_line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\s*//\s*(?P<annotation>@\w+)\s+(?P<content>.*)$").unwrap()
+        Regex::new(r"^\s*//\s*(?P<annotation>@\w+)\s+(?P<content>.*)$")
+            .expect("annotation regex is a static literal and must compile")
     })
 }
 
@@ -128,16 +127,23 @@ impl fmt::Display for Route {
     }
 }
 
-pub fn find_all_routes(_root_directory: &str, conn: &Connection) -> Vec<Route> {
-    let root = Path::new(API_PROJECT_ROOT);
+pub fn find_all_routes(root_directory: &Path, conn: &Connection) -> Vec<Route> {
     let mut go_files = Vec::new();
-    collect_go_files(root, &mut go_files);
+    collect_go_files(root_directory, &mut go_files);
 
     for path in &go_files {
-        scan_go_file(path, conn);
+        if let Err(e) = scan_go_file(path, conn) {
+            eprintln!("scan {}: {e}", path.display());
+        }
     }
 
-    load_database_routes(conn)
+    match load_database_routes(conn) {
+        Ok(routes) => routes,
+        Err(e) => {
+            eprintln!("load routes: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -159,24 +165,20 @@ fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn scan_go_file(path: &Path, conn: &Connection) {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Error opening {}: {}", path.display(), e);
-            return;
-        }
-    };
-
+fn scan_go_file(path: &Path, conn: &Connection) -> std::io::Result<()> {
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut line_count = 0;
+    let mut line_count = 0_usize;
     let mut current_route: Vec<Line> = Vec::new();
 
     for line_res in reader.split(b'\n') {
         line_count += 1;
-        let Ok(bytes) = line_res else {
-            eprintln!("Error reading line in {}", path.display());
-            continue;
+        let bytes = match line_res {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("read {} line {line_count}: {e}", path.display());
+                continue;
+            }
         };
 
         let content = String::from_utf8_lossy(&bytes)
@@ -199,11 +201,14 @@ fn scan_go_file(path: &Path, conn: &Connection) {
     }
 
     flush_route_block(&mut current_route, conn);
+    Ok(())
 }
 
 fn handle_comment_line(line: &Line, conn: &Connection, current_route: &mut Vec<Line>) {
     if let Some(controller_name) = parse_controller_annotation(&line.content) {
-        save_controller_if_new(conn, &controller_name);
+        if let Err(e) = save_controller_if_new(conn, &controller_name) {
+            eprintln!("save controller `{controller_name}`: {e}");
+        }
         return;
     }
 
@@ -229,7 +234,9 @@ fn is_route_annotation(content: &str) -> bool {
     let Some(caps) = annotation_line_re().captures(content) else {
         return false;
     };
-    let annotation = caps.name("annotation").map(|m| m.as_str()).unwrap_or("");
+    let Some(annotation) = caps.name("annotation").map(|m| m.as_str()) else {
+        return false;
+    };
     matches!(
         annotation,
         "@Summary" | "@Route" | "@Method" | "@Param" | "@Body"
@@ -248,55 +255,32 @@ fn flush_route_block(current_route: &mut Vec<Line>, conn: &Connection) {
         return;
     }
 
-    let method_str = route.method().to_string();
-    if route_exists_in_db(conn, route.path(), &method_str) {
-        return;
+    if let Err(e) = save_route_if_new(conn, &route) {
+        eprintln!("save route `{} {}`: {e}", route.method(), route.path());
     }
-
-    save_route_if_new(conn, &route);
 }
 
-fn route_exists_in_db(conn: &Connection, path: &str, method: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM routes WHERE path = ?1 AND method = ?2",
-        [path, method],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
-fn controller_exists_in_db(conn: &Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM controllers WHERE name = ?1",
-        [name],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
-fn save_controller_if_new(conn: &Connection, name: &str) {
-    if controller_exists_in_db(conn, name) {
-        return;
-    }
-
-    let _ = conn.execute(
+fn save_controller_if_new(conn: &Connection, name: &str) -> rusqlite::Result<()> {
+    conn.execute(
         "INSERT INTO controllers (name)
          SELECT ?1
          WHERE NOT EXISTS (SELECT 1 FROM controllers WHERE name = ?1)",
         [name],
-    );
+    )?;
+    Ok(())
 }
 
-fn save_route_if_new(conn: &Connection, route: &Route) {
+fn save_route_if_new(conn: &Connection, route: &Route) -> rusqlite::Result<()> {
     let method_str = route.method().to_string();
-    let _ = conn.execute(
+    conn.execute(
         "INSERT INTO routes (summary, path, method)
          SELECT ?1, ?2, ?3
          WHERE NOT EXISTS (
              SELECT 1 FROM routes WHERE path = ?2 AND method = ?3
          )",
         (route.summary(), route.path(), method_str.as_str()),
-    );
+    )?;
+    Ok(())
 }
 
 fn parse_route(lines: &[Line]) -> Route {
@@ -307,55 +291,47 @@ fn parse_route(lines: &[Line]) -> Route {
         let Some(caps) = re.captures(&line.content) else {
             continue;
         };
-        let annotation = caps.name("annotation").map(|m| m.as_str()).unwrap_or("");
+        let Some(annotation) = caps.name("annotation").map(|m| m.as_str()) else {
+            continue;
+        };
         let content = caps
             .name("content")
             .map(|m| m.as_str().trim())
-            .unwrap_or("");
+            .unwrap_or_default();
 
         match annotation {
-            "@Summary" => {
-                if content.is_empty() {
-                    eprintln!("Summary missing on line {}", line.line_number);
-                } else {
-                    route.summary = content.to_string();
-                }
-            }
-            "@Route" => {
-                if content.is_empty() {
-                    eprintln!("Path missing on line {}", line.line_number);
-                } else {
-                    route.path = content.to_string();
-                }
-            }
+            "@Summary" if !content.is_empty() => route.summary = content.to_string(),
+            "@Summary" => eprintln!("Summary missing on line {}", line.line_number),
+            "@Route" if !content.is_empty() => route.path = content.to_string(),
+            "@Route" => eprintln!("Path missing on line {}", line.line_number),
             "@Method" => {
                 if content.is_empty() {
                     eprintln!("Method not found on line {}", line.line_number);
                     continue;
                 }
-                let method = content.replace('[', "").replace(']', "").trim().to_uppercase();
+                let method = content
+                    .replace(['[', ']'], "")
+                    .trim()
+                    .to_uppercase();
                 match Method::from_str(&method) {
                     Ok(m) => route.method = m,
-                    Err(_) => {
-                        eprintln!("Unknown HTTP method on line {}", line.line_number);
-                    }
+                    Err(_) => eprintln!(
+                        "Unknown HTTP method `{method}` on line {}",
+                        line.line_number
+                    ),
                 }
             }
-            "@Param" => {}
-            "@Body" => {}
-            _ => continue,
+            "@Param" | "@Body" => {}
+            _ => {}
         }
     }
 
     route
 }
 
-fn load_database_routes(conn: &Connection) -> Vec<Route> {
-    let mut stmt = match conn.prepare("SELECT summary, path, method FROM routes") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let mapped = stmt.query_map([], |row| {
+fn load_database_routes(conn: &Connection) -> rusqlite::Result<Vec<Route>> {
+    let mut stmt = conn.prepare("SELECT summary, path, method FROM routes")?;
+    let rows = stmt.query_map([], |row| {
         let summary: String = row.get(0)?;
         let path: String = row.get(1)?;
         let method_str: String = row.get(2)?;
@@ -367,9 +343,13 @@ fn load_database_routes(conn: &Connection) -> Vec<Route> {
             query_params: Vec::new(),
             body_params: Vec::new(),
         })
-    });
-    match mapped {
-        Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-        Err(_) => Vec::new(),
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(route) => out.push(route),
+            Err(e) => eprintln!("row decode: {e}"),
+        }
     }
+    Ok(out)
 }

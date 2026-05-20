@@ -1,8 +1,30 @@
+#![allow(dead_code)]
+
+use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::types::LogEntry;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct LogEntry {
+    pub route: String,
+    pub method: String,
+    pub latency_ms: f64,
+    #[allow(dead_code)]
+    pub timestamp: String,
+}
+
+impl fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {} {}",
+            self.route, self.method, self.latency_ms, self.timestamp
+        )
+    }
+}
 
 pub struct LogParser {
     path: PathBuf,
