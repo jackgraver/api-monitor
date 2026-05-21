@@ -1,3 +1,4 @@
+mod db;
 mod error;
 mod log_parser;
 mod router_parser;
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), AppError> {
     let project_root = read_project_root()?;
     let conn = open_database(DATABASE_PATH)?;
-    ensure_schema(&conn)?;
+    db::ensure_schema(&conn)?;
 
     let routes = router_parser::find_all_routes(&project_root, &conn);
     ui::run(routes)?;
@@ -54,22 +55,4 @@ fn read_project_root() -> Result<PathBuf, AppError> {
 fn open_database(path: &str) -> Result<Connection, AppError> {
     let conn = Connection::open(path)?;
     Ok(conn)
-}
-
-fn ensure_schema(conn: &Connection) -> Result<(), AppError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS routes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            summary TEXT,
-            path TEXT,
-            method TEXT,
-            query_params TEXT,
-            body_params TEXT
-         );
-         CREATE TABLE IF NOT EXISTS controllers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT
-         );",
-    )?;
-    Ok(())
 }

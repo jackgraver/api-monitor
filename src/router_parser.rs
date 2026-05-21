@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 use rusqlite::Connection;
 
+use crate::db::default_app_id;
+
 fn annotation_line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -128,16 +130,24 @@ impl fmt::Display for Route {
 }
 
 pub fn find_all_routes(root_directory: &Path, conn: &Connection) -> Vec<Route> {
+    let app_id = match default_app_id(conn) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("default app: {e}");
+            return Vec::new();
+        }
+    };
+
     let mut go_files = Vec::new();
     collect_go_files(root_directory, &mut go_files);
 
     for path in &go_files {
-        if let Err(e) = scan_go_file(path, conn) {
+        if let Err(e) = scan_go_file(path, conn, app_id) {
             eprintln!("scan {}: {e}", path.display());
         }
     }
 
-    match load_database_routes(conn) {
+    match load_database_routes(conn, app_id) {
         Ok(routes) => routes,
         Err(e) => {
             eprintln!("load routes: {e}");
@@ -165,7 +175,7 @@ fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn scan_go_file(path: &Path, conn: &Connection) -> std::io::Result<()> {
+fn scan_go_file(path: &Path, conn: &Connection, app_id: i64) -> std::io::Result<()> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut line_count = 0_usize;
@@ -188,7 +198,7 @@ fn scan_go_file(path: &Path, conn: &Connection) -> std::io::Result<()> {
         let line = Line::new(content, line_count);
 
         if line.content.is_empty() {
-            flush_route_block(&mut current_route, conn);
+            flush_route_block(&mut current_route, conn, app_id);
             continue;
         }
 
@@ -197,10 +207,10 @@ fn scan_go_file(path: &Path, conn: &Connection) -> std::io::Result<()> {
             continue;
         }
 
-        flush_route_block(&mut current_route, conn);
+        flush_route_block(&mut current_route, conn, app_id);
     }
 
-    flush_route_block(&mut current_route, conn);
+    flush_route_block(&mut current_route, conn, app_id);
     Ok(())
 }
 
@@ -243,7 +253,7 @@ fn is_route_annotation(content: &str) -> bool {
     )
 }
 
-fn flush_route_block(current_route: &mut Vec<Line>, conn: &Connection) {
+fn flush_route_block(current_route: &mut Vec<Line>, conn: &Connection, app_id: i64) {
     if current_route.is_empty() {
         return;
     }
@@ -255,7 +265,7 @@ fn flush_route_block(current_route: &mut Vec<Line>, conn: &Connection) {
         return;
     }
 
-    if let Err(e) = save_route_if_new(conn, &route) {
+    if let Err(e) = save_route_if_new(conn, &route, app_id) {
         eprintln!("save route `{} {}`: {e}", route.method(), route.path());
     }
 }
@@ -270,15 +280,21 @@ fn save_controller_if_new(conn: &Connection, name: &str) -> rusqlite::Result<()>
     Ok(())
 }
 
-fn save_route_if_new(conn: &Connection, route: &Route) -> rusqlite::Result<()> {
+fn save_route_if_new(conn: &Connection, route: &Route, app_id: i64) -> rusqlite::Result<()> {
     let method_str = route.method().to_string();
     conn.execute(
-        "INSERT INTO routes (summary, path, method)
-         SELECT ?1, ?2, ?3
+        "INSERT INTO routes (app_id, summary, path, method)
+         SELECT ?1, ?2, ?3, ?4
          WHERE NOT EXISTS (
-             SELECT 1 FROM routes WHERE path = ?2 AND method = ?3
+             SELECT 1 FROM routes
+             WHERE app_id = ?1 AND path = ?3 AND method = ?4
          )",
-        (route.summary(), route.path(), method_str.as_str()),
+        (
+            app_id,
+            route.summary(),
+            route.path(),
+            method_str.as_str(),
+        ),
     )?;
     Ok(())
 }
@@ -329,9 +345,10 @@ fn parse_route(lines: &[Line]) -> Route {
     route
 }
 
-fn load_database_routes(conn: &Connection) -> rusqlite::Result<Vec<Route>> {
-    let mut stmt = conn.prepare("SELECT summary, path, method FROM routes")?;
-    let rows = stmt.query_map([], |row| {
+fn load_database_routes(conn: &Connection, app_id: i64) -> rusqlite::Result<Vec<Route>> {
+    let mut stmt =
+        conn.prepare("SELECT summary, path, method FROM routes WHERE app_id = ?1")?;
+    let rows = stmt.query_map([app_id], |row| {
         let summary: String = row.get(0)?;
         let path: String = row.get(1)?;
         let method_str: String = row.get(2)?;
