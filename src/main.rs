@@ -31,8 +31,9 @@ fn run() -> Result<(), AppError> {
     let conn = open_database(DATABASE_PATH)?;
     db::ensure_schema(&conn)?;
 
+    let app = db::load_default_app(&conn)?;
     let routes = router_parser::find_all_routes(&project_root, &conn);
-    ui::run(routes)?;
+    ui::run(app, routes)?;
     Ok(())
 }
 

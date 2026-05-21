@@ -4,6 +4,11 @@ use crate::error::AppError;
 
 pub const DEFAULT_APP_SLUG: &str = "simpletracker";
 
+pub struct AppInfo {
+    pub slug: String,
+    pub display_name: String,
+}
+
 pub fn ensure_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS apps (
@@ -67,6 +72,20 @@ pub fn default_app_id(conn: &Connection) -> Result<i64, AppError> {
         "SELECT id FROM apps WHERE slug = ?1",
         [DEFAULT_APP_SLUG],
         |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub fn load_default_app(conn: &Connection) -> Result<AppInfo, AppError> {
+    conn.query_row(
+        "SELECT slug, display_name FROM apps WHERE slug = ?1",
+        [DEFAULT_APP_SLUG],
+        |row| {
+            Ok(AppInfo {
+                slug: row.get(0)?,
+                display_name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            })
+        },
     )
     .map_err(Into::into)
 }

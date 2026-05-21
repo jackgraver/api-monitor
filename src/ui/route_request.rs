@@ -6,9 +6,11 @@ use reqwest::blocking::{Client, RequestBuilder};
 use crate::error::RequestError;
 use crate::router_parser::Method;
 
-const API_BASE: &str = "http://localhost:8080";
+const DEFAULT_API_BASE: &str = "http://localhost:8080";
+const DEFAULT_HEALTH_PATH: &str = "/health";
 const AUTH_COOKIE_NAME: &str = "auth_token";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub enum RequestOutcome {
     Success {
@@ -25,6 +27,88 @@ pub enum RequestState {
     Done(RequestOutcome),
 }
 
+pub enum HealthOutcome {
+    Up {
+        status: u16,
+        elapsed_ms: u128,
+    },
+    Down(String),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum HealthState {
+    Unknown,
+    Checking,
+    Up {
+        status: u16,
+        elapsed_ms: u128,
+    },
+    Down(String),
+}
+
+impl HealthState {
+    pub fn is_up(&self) -> bool {
+        matches!(self, HealthState::Up { .. })
+    }
+
+    pub fn apply_outcome(&mut self, outcome: HealthOutcome) {
+        *self = match outcome {
+            HealthOutcome::Up {
+                status,
+                elapsed_ms,
+            } => HealthState::Up {
+                status,
+                elapsed_ms,
+            },
+            HealthOutcome::Down(msg) => HealthState::Down(msg),
+        };
+    }
+}
+
+pub fn api_base() -> String {
+    std::env::var("API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
+}
+
+pub fn health_url() -> String {
+    let base = api_base();
+    let path = health_path();
+    format!("{}{}", base.trim_end_matches('/'), path)
+}
+
+fn health_path() -> String {
+    let raw = std::env::var("API_HEALTH_PATH").unwrap_or_else(|_| DEFAULT_HEALTH_PATH.to_string());
+    if raw.starts_with('/') {
+        raw
+    } else {
+        format!("/{raw}")
+    }
+}
+
+pub fn check_health() -> HealthOutcome {
+    let client = match Client::builder().timeout(HEALTH_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return HealthOutcome::Down(format!("client: {e}")),
+    };
+
+    let url = health_url();
+    let started = Instant::now();
+    match client.get(&url).send() {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let elapsed_ms = started.elapsed().as_millis();
+            if resp.status().is_success() {
+                HealthOutcome::Up {
+                    status,
+                    elapsed_ms,
+                }
+            } else {
+                HealthOutcome::Down(format!("HTTP {status}"))
+            }
+        }
+        Err(e) => HealthOutcome::Down(e.to_string()),
+    }
+}
+
 pub fn send(path: &str, method: &Method) -> RequestOutcome {
     match try_send(path, method) {
         Ok(outcome) => outcome,
@@ -39,7 +123,7 @@ fn try_send(path: &str, method: &Method) -> Result<RequestOutcome, RequestError>
         .build()
         .map_err(RequestError::ClientBuild)?;
 
-    let url = format!("{API_BASE}{path}");
+    let url = format!("{}{}", api_base().trim_end_matches('/'), path);
     let req = build_request(&client, method, &url, &cookie);
 
     let started = Instant::now();

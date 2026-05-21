@@ -5,7 +5,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::router_parser::{Param, Route};
 
 use super::route_list::method_fg;
-use super::route_request::{RequestOutcome, RequestState};
+use super::route_request::{HealthState, RequestOutcome, RequestState};
 
 const MAX_BODY_DISPLAY: usize = 50_000;
 
@@ -57,9 +57,9 @@ pub fn params_lines(route: Option<&Route>) -> Vec<Line<'static>> {
     }
 }
 
-pub fn response_lines(request: &RequestState) -> Vec<Line<'static>> {
+pub fn response_lines(request: &RequestState, api_base: &str, health: &HealthState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    append_request_lines(&mut lines, request);
+    append_request_lines(&mut lines, request, api_base, health);
     lines
 }
 
@@ -73,11 +73,40 @@ pub fn line_count(lines: &[Line], _width: u16) -> u16 {
     lines.len() as u16
 }
 
-fn append_request_lines(out: &mut Vec<Line<'static>>, request: &RequestState) {
+fn append_request_lines(
+    out: &mut Vec<Line<'static>>,
+    request: &RequestState,
+    api_base: &str,
+    health: &HealthState,
+) {
+    if !health.is_up() {
+        let msg = match health {
+            HealthState::Checking => "API health check in progress…",
+            HealthState::Down(reason) => {
+                out.push(Line::from(vec![Span::styled(
+                    format!("API unreachable ({reason})"),
+                    Style::default().fg(Color::Red),
+                )]));
+                out.push(Line::from(vec![Span::styled(
+                    "Start the API server, then wait for the status bar to show UP.",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                return;
+            }
+            HealthState::Unknown => "API status unknown; waiting for health check…",
+            HealthState::Up { .. } => unreachable!(),
+        };
+        out.push(Line::from(vec![Span::styled(
+            msg,
+            Style::default().fg(Color::Yellow),
+        )]));
+        return;
+    }
+
     match request {
         RequestState::Idle => {
             out.push(Line::from(vec![Span::styled(
-                "Press Enter to send a request to localhost:8080",
+                format!("Press Enter to send a request to {api_base}"),
                 Style::default().fg(Color::DarkGray),
             )]));
         }

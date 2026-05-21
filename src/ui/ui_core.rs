@@ -1,6 +1,7 @@
 use std::io::{self, stdout, Stdout};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -16,11 +17,16 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 
+use crate::db::AppInfo;
 use crate::router_parser::Route;
 
 use super::route_detail;
 use super::route_list;
-use super::route_request::{self, RequestOutcome, RequestState};
+use super::route_request::{
+    self, HealthOutcome, HealthState, RequestOutcome, RequestState,
+};
+
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -35,6 +41,9 @@ struct LayoutRects {
 }
 
 struct App {
+    app: AppInfo,
+    api_base: String,
+    health_url: String,
     routes: Vec<Route>,
     search: String,
     filtered: Vec<usize>,
@@ -43,17 +52,20 @@ struct App {
     response_scroll: u16,
     request: RequestState,
     request_rx: Option<Receiver<RequestOutcome>>,
+    health: HealthState,
+    health_rx: Option<Receiver<HealthOutcome>>,
+    last_health_poll: Instant,
     last_selected_route: Option<usize>,
 }
 
-pub fn run(routes: Vec<Route>) -> io::Result<()> {
+pub fn run(app_info: AppInfo, routes: Vec<Route>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(routes);
+    let mut app = App::new(app_info, routes);
     let app_result = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
@@ -64,13 +76,16 @@ pub fn run(routes: Vec<Route>) -> io::Result<()> {
 }
 
 impl App {
-    fn new(routes: Vec<Route>) -> Self {
+    fn new(app: AppInfo, routes: Vec<Route>) -> Self {
         let filtered = route_list::filter_indices(&routes, "");
         let mut list_state = ListState::default();
         if !filtered.is_empty() {
             list_state.select(Some(0));
         }
-        Self {
+        let mut this = Self {
+            app,
+            api_base: route_request::api_base(),
+            health_url: route_request::health_url(),
             routes,
             search: String::new(),
             filtered,
@@ -79,7 +94,50 @@ impl App {
             response_scroll: 0,
             request: RequestState::Idle,
             request_rx: None,
+            health: HealthState::Unknown,
+            health_rx: None,
+            last_health_poll: Instant::now(),
             last_selected_route: None,
+        };
+        this.spawn_health_check();
+        this
+    }
+
+    fn spawn_health_check(&mut self) {
+        if self.health_rx.is_some() {
+            return;
+        }
+        self.health = HealthState::Checking;
+        self.last_health_poll = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        self.health_rx = Some(rx);
+        thread::spawn(move || {
+            let outcome = route_request::check_health();
+            let _ = tx.send(outcome);
+        });
+    }
+
+    fn poll_health(&mut self) {
+        let Some(rx) = self.health_rx.as_ref() else {
+            if self.last_health_poll.elapsed() >= HEALTH_POLL_INTERVAL {
+                self.spawn_health_check();
+            }
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.health.apply_outcome(outcome);
+                self.health_rx = None;
+                self.last_health_poll = Instant::now();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.health = HealthState::Down("Health check thread ended".to_string());
+                self.health_rx = None;
+            }
+        }
+        if self.health_rx.is_none() && self.last_health_poll.elapsed() >= HEALTH_POLL_INTERVAL {
+            self.spawn_health_check();
         }
     }
 
@@ -99,11 +157,20 @@ impl App {
         ]
     }
 
+    fn content_area(area: Rect) -> Rect {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        chunks[1]
+    }
+
     fn layout(area: Rect) -> LayoutRects {
+        let content = Self::content_area(area);
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-            .split(area);
+            .split(content);
 
         let right = Self::right_column_layout(columns[1]);
         let response_chunks = Layout::default()
@@ -151,6 +218,17 @@ impl App {
 
     fn send_request(&mut self) {
         if self.request_rx.is_some() {
+            return;
+        }
+        if !self.health.is_up() {
+            let msg = match &self.health {
+                HealthState::Checking => "API health check in progress".to_string(),
+                HealthState::Down(reason) => format!("API unreachable: {reason}"),
+                HealthState::Unknown => "API status unknown".to_string(),
+                HealthState::Up { .. } => unreachable!(),
+            };
+            self.request = RequestState::Done(RequestOutcome::Error(msg));
+            self.response_scroll = 0;
             return;
         }
         let Some(route) = self.selected_route() else {
@@ -265,6 +343,67 @@ fn detail_border_style(focus: Focus) -> Style {
     }
 }
 
+fn status_bar_line(app: &App) -> Line<'static> {
+    let app_label = if app.app.display_name.is_empty() {
+        app.app.slug.clone()
+    } else {
+        format!("{} ({})", app.app.display_name, app.app.slug)
+    };
+
+    let (health_symbol, health_style, health_text): (&str, Style, String) = match &app.health {
+        HealthState::Unknown => (
+            "○",
+            Style::default().fg(Color::DarkGray),
+            "checking…".to_string(),
+        ),
+        HealthState::Checking => (
+            "◌",
+            Style::default().fg(Color::Yellow),
+            "checking…".to_string(),
+        ),
+        HealthState::Up {
+            status,
+            elapsed_ms,
+        } => (
+            "●",
+            Style::default().fg(Color::Green),
+            format!("UP {status} ({elapsed_ms} ms)"),
+        ),
+        HealthState::Down(reason) => {
+            let short = if reason.len() > 40 {
+                format!("{}…", &reason[..40])
+            } else {
+                reason.clone()
+            };
+            return Line::from(vec![
+                Span::styled(" App: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(app_label),
+                Span::raw(" │ "),
+                Span::styled(" API: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(app.api_base.clone()),
+                Span::raw(" │ "),
+                Span::styled(" Health: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("● ", Style::default().fg(Color::Red)),
+                Span::styled(format!("DOWN — {short}"), Style::default().fg(Color::Red)),
+                Span::raw(format!("  {}", app.health_url)),
+            ]);
+        }
+    };
+
+    Line::from(vec![
+        Span::styled(" App: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(app_label),
+        Span::raw(" │ "),
+        Span::styled(" API: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(app.api_base.clone()),
+        Span::raw(" │ "),
+        Span::styled(" Health: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{health_symbol} "), health_style),
+        Span::styled(health_text, health_style),
+        Span::raw(format!("  {}", app.health_url)),
+    ])
+}
+
 fn horizontal_divider(width: u16) -> Paragraph<'static> {
     let n = width.max(1) as usize;
     let line = "─".repeat(n);
@@ -300,10 +439,12 @@ fn render_scrollbar(
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_request();
+        app.poll_health();
 
         let area = terminal_area(terminal)?;
         let layout = App::layout(area);
-        let response_lines = route_detail::response_lines(&app.request);
+        let response_lines =
+            route_detail::response_lines(&app.request, &app.api_base, &app.health);
         App::clamp_scroll(
             &mut app.response_scroll,
             &response_lines,
@@ -315,10 +456,19 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             let area = f.area();
             let layout = App::layout(area);
 
+            let root = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(area);
+
+            let status = Paragraph::new(status_bar_line(app));
+            f.render_widget(status, root[0]);
+
+            let content = root[1];
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                .split(area);
+                .split(content);
 
             let left = Layout::default()
                 .direction(Direction::Vertical)
@@ -376,7 +526,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             let route = app.selected_route();
             let summary_lines = route_detail::summary_lines(route);
             let params_lines = route_detail::params_lines(route);
-            let response_lines = route_detail::response_lines(&app.request);
+            let response_lines =
+                route_detail::response_lines(&app.request, &app.api_base, &app.health);
             let detail_style = detail_border_style(app.focus);
 
             let right = App::right_column_layout(columns[1]);
@@ -428,7 +579,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let layout = App::layout(terminal_area(terminal)?);
-                    let response_lines = route_detail::response_lines(&app.request);
+                    let response_lines =
+                        route_detail::response_lines(&app.request, &app.api_base, &app.health);
 
                     if handle_key(app, key.code, &layout, &response_lines)? {
                         return Ok(());
