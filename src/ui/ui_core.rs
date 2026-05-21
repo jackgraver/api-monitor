@@ -30,8 +30,8 @@ enum Focus {
 }
 
 struct LayoutRects {
-    detail_inner_width: u16,
-    detail_inner_height: u16,
+    response_inner_width: u16,
+    response_inner_height: u16,
 }
 
 struct App {
@@ -40,7 +40,7 @@ struct App {
     filtered: Vec<usize>,
     list_state: ListState,
     focus: Focus,
-    detail_scroll: u16,
+    response_scroll: u16,
     request: RequestState,
     request_rx: Option<Receiver<RequestOutcome>>,
     last_selected_route: Option<usize>,
@@ -76,11 +76,27 @@ impl App {
             filtered,
             list_state,
             focus: Focus::Routes,
-            detail_scroll: 0,
+            response_scroll: 0,
             request: RequestState::Idle,
             request_rx: None,
             last_selected_route: None,
         }
+    }
+
+    fn right_column_layout(area: Rect) -> [Rect; 5] {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(22),
+                Constraint::Length(1),
+                Constraint::Percentage(38),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        [
+            chunks[0], chunks[1], chunks[2], chunks[3], chunks[4],
+        ]
     }
 
     fn layout(area: Rect) -> LayoutRects {
@@ -89,15 +105,15 @@ impl App {
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(area);
 
-        let detail_chunks = Layout::default()
+        let right = Self::right_column_layout(columns[1]);
+        let response_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(columns[1]);
+            .split(right[4]);
 
-        let detail = detail_chunks[0];
         LayoutRects {
-            detail_inner_width: detail.width.saturating_sub(2),
-            detail_inner_height: detail.height.saturating_sub(2),
+            response_inner_width: response_chunks[0].width.saturating_sub(2),
+            response_inner_height: response_chunks[0].height.saturating_sub(2),
         }
     }
 
@@ -129,7 +145,7 @@ impl App {
             self.last_selected_route = route_i;
             self.request = RequestState::Idle;
             self.request_rx = None;
-            self.detail_scroll = 0;
+            self.response_scroll = 0;
         }
     }
 
@@ -144,7 +160,7 @@ impl App {
         let method = *route.method();
 
         self.request = RequestState::Loading;
-        self.detail_scroll = 0;
+        self.response_scroll = 0;
         let (tx, rx) = mpsc::channel();
         self.request_rx = Some(rx);
 
@@ -162,7 +178,7 @@ impl App {
             Ok(outcome) => {
                 self.request = RequestState::Done(outcome);
                 self.request_rx = None;
-                self.detail_scroll = 0;
+                self.response_scroll = 0;
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -182,26 +198,49 @@ impl App {
         };
     }
 
-    fn clamp_detail_scroll(&mut self, layout: &LayoutRects, lines: &[Line]) {
-        let total = route_detail::line_count(lines, layout.detail_inner_width);
-        let max_scroll = total.saturating_sub(layout.detail_inner_height);
-        self.detail_scroll = self.detail_scroll.min(max_scroll);
+    fn clamp_scroll(
+        scroll: &mut u16,
+        lines: &[Line],
+        inner_width: u16,
+        inner_height: u16,
+    ) {
+        let total = route_detail::line_count(lines, inner_width);
+        let max_scroll = total.saturating_sub(inner_height);
+        *scroll = (*scroll).min(max_scroll);
     }
 
-    fn scroll_detail(&mut self, delta: i16, layout: &LayoutRects, lines: &[Line]) {
-        let total = route_detail::line_count(lines, layout.detail_inner_width);
-        let max_scroll = total.saturating_sub(layout.detail_inner_height);
+    fn scroll_section(
+        scroll: &mut u16,
+        delta: i16,
+        lines: &[Line],
+        inner_width: u16,
+        inner_height: u16,
+    ) {
+        let total = route_detail::line_count(lines, inner_width);
+        let max_scroll = total.saturating_sub(inner_height);
 
         if delta < 0 {
-            self.detail_scroll = self.detail_scroll.saturating_sub((-delta) as u16);
+            *scroll = (*scroll).saturating_sub((-delta) as u16);
         } else {
-            self.detail_scroll = (self.detail_scroll + delta as u16).min(max_scroll);
+            *scroll = ((*scroll) + delta as u16).min(max_scroll);
         }
     }
 
-    fn scroll_detail_page(&mut self, up: bool, layout: &LayoutRects, lines: &[Line]) {
-        let page = layout.detail_inner_height.saturating_sub(1).max(1) as i16;
-        self.scroll_detail(if up { -page } else { page }, layout, lines);
+    fn scroll_section_page(
+        scroll: &mut u16,
+        up: bool,
+        lines: &[Line],
+        inner_width: u16,
+        inner_height: u16,
+    ) {
+        let page = inner_height.saturating_sub(1).max(1) as i16;
+        Self::scroll_section(
+            scroll,
+            if up { -page } else { page },
+            lines,
+            inner_width,
+            inner_height,
+        );
     }
 }
 
@@ -218,14 +257,59 @@ fn search_block_title(focus: Focus) -> &'static str {
     }
 }
 
+fn detail_border_style(focus: Focus) -> Style {
+    if focus == Focus::Detail {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    }
+}
+
+fn horizontal_divider(width: u16) -> Paragraph<'static> {
+    let n = width.max(1) as usize;
+    let line = "─".repeat(n);
+    Paragraph::new(Line::from(Span::styled(
+        line,
+        Style::default().fg(Color::DarkGray),
+    )))
+}
+
+fn render_scrollbar(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    lines: &[Line],
+    inner_width: u16,
+    inner_height: u16,
+    scroll: u16,
+) {
+    let total_lines = route_detail::line_count(lines, inner_width) as usize;
+    let visible = inner_height as usize;
+    if total_lines > visible {
+        let mut scrollbar_state =
+            ScrollbarState::new(total_lines).position(scroll as usize);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("█")
+                .track_symbol(Some("│")),
+            area,
+            &mut scrollbar_state,
+        );
+    }
+}
+
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_request();
 
         let area = terminal_area(terminal)?;
         let layout = App::layout(area);
-        let detail_lines = route_detail::detail_lines(app.selected_route(), &app.request);
-        app.clamp_detail_scroll(&layout, &detail_lines);
+        let response_lines = route_detail::response_lines(&app.request);
+        App::clamp_scroll(
+            &mut app.response_scroll,
+            &response_lines,
+            layout.response_inner_width,
+            layout.response_inner_height,
+        );
 
         terminal.draw(|f| {
             let area = f.area();
@@ -289,53 +373,64 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                 .highlight_style(Style::default().bg(Color::DarkGray));
             f.render_stateful_widget(list, left[1], &mut app.list_state);
 
-            let detail_lines =
-                route_detail::detail_lines(app.selected_route(), &app.request);
-            app.clamp_detail_scroll(&layout, &detail_lines);
+            let route = app.selected_route();
+            let summary_lines = route_detail::summary_lines(route);
+            let params_lines = route_detail::params_lines(route);
+            let response_lines = route_detail::response_lines(&app.request);
+            let detail_style = detail_border_style(app.focus);
 
-            let detail = route_detail::detail_paragraph(detail_lines.clone(), app.detail_scroll)
+            let right = App::right_column_layout(columns[1]);
+
+            let summary = route_detail::section_paragraph(summary_lines, 0).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Summary ")
+                    .border_style(detail_style),
+            );
+            f.render_widget(summary, right[0]);
+            f.render_widget(horizontal_divider(right[1].width), right[1]);
+
+            let params = route_detail::section_paragraph(params_lines.clone(), 0)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Detail (Enter send, Tab focus, PgUp/Dn scroll) ")
-                        .border_style(if app.focus == Focus::Detail {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        }),
+                        .title(" Parameters ")
+                        .border_style(detail_style),
                 );
+            f.render_widget(params, right[2]);
+            f.render_widget(horizontal_divider(right[3].width), right[3]);
 
-            let detail_chunks = Layout::default()
+            let response_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(0), Constraint::Length(1)])
-                .split(columns[1]);
+                .split(right[4]);
 
-            f.render_widget(detail, detail_chunks[0]);
-
-            let total_lines =
-                route_detail::line_count(&detail_lines, layout.detail_inner_width) as usize;
-            let visible = layout.detail_inner_height as usize;
-            if total_lines > visible {
-                let mut scrollbar_state =
-                    ScrollbarState::new(total_lines).position(app.detail_scroll as usize);
-                f.render_stateful_widget(
-                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                        .thumb_symbol("█")
-                        .track_symbol(Some("│")),
-                    detail_chunks[1],
-                    &mut scrollbar_state,
-                );
-            }
+            let response =
+                route_detail::section_paragraph(response_lines.clone(), app.response_scroll)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Response (Enter send, PgUp/Dn scroll) ")
+                            .border_style(detail_style),
+                    );
+            f.render_widget(response, response_chunks[0]);
+            render_scrollbar(
+                f,
+                response_chunks[1],
+                &response_lines,
+                layout.response_inner_width,
+                layout.response_inner_height,
+                app.response_scroll,
+            );
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let layout = App::layout(terminal_area(terminal)?);
-                    let detail_lines =
-                        route_detail::detail_lines(app.selected_route(), &app.request);
+                    let response_lines = route_detail::response_lines(&app.request);
 
-                    if handle_key(app, key.code, &layout, &detail_lines)? {
+                    if handle_key(app, key.code, &layout, &response_lines)? {
                         return Ok(());
                     }
                 }
@@ -348,7 +443,7 @@ fn handle_key(
     app: &mut App,
     code: KeyCode,
     layout: &LayoutRects,
-    detail_lines: &[Line],
+    response_lines: &[Line],
 ) -> io::Result<bool> {
     match code {
         KeyCode::Char('q') => return Ok(true),
@@ -385,7 +480,13 @@ fn handle_key(
                     app.on_selection_change();
                 }
             }
-            Focus::Detail => app.scroll_detail(1, layout, detail_lines),
+            Focus::Detail => App::scroll_section(
+                &mut app.response_scroll,
+                1,
+                response_lines,
+                layout.response_inner_width,
+                layout.response_inner_height,
+            ),
         },
         KeyCode::Up | KeyCode::Char('k') => match app.focus {
             Focus::Routes => {
@@ -395,29 +496,48 @@ fn handle_key(
                     app.on_selection_change();
                 }
             }
-            Focus::Detail => app.scroll_detail(-1, layout, detail_lines),
+            Focus::Detail => App::scroll_section(
+                &mut app.response_scroll,
+                -1,
+                response_lines,
+                layout.response_inner_width,
+                layout.response_inner_height,
+            ),
             Focus::Search => {}
         },
         KeyCode::PageDown => {
             if app.focus == Focus::Detail {
-                app.scroll_detail_page(false, layout, detail_lines);
+                App::scroll_section_page(
+                    &mut app.response_scroll,
+                    false,
+                    response_lines,
+                    layout.response_inner_width,
+                    layout.response_inner_height,
+                );
             }
         }
         KeyCode::PageUp => {
             if app.focus == Focus::Detail {
-                app.scroll_detail_page(true, layout, detail_lines);
+                App::scroll_section_page(
+                    &mut app.response_scroll,
+                    true,
+                    response_lines,
+                    layout.response_inner_width,
+                    layout.response_inner_height,
+                );
             }
         }
         KeyCode::Home | KeyCode::Char('g') => {
             if app.focus == Focus::Detail {
-                app.detail_scroll = 0;
+                app.response_scroll = 0;
             }
         }
         KeyCode::End | KeyCode::Char('G') => {
             if app.focus == Focus::Detail {
-                let total = route_detail::line_count(detail_lines, layout.detail_inner_width);
-                let max_scroll = total.saturating_sub(layout.detail_inner_height);
-                app.detail_scroll = max_scroll;
+                let total =
+                    route_detail::line_count(response_lines, layout.response_inner_width);
+                let max_scroll = total.saturating_sub(layout.response_inner_height);
+                app.response_scroll = max_scroll;
             }
         }
         _ => {}

@@ -9,21 +9,61 @@ use super::route_request::{RequestOutcome, RequestState};
 
 const MAX_BODY_DISPLAY: usize = 50_000;
 
-pub fn detail_lines(route: Option<&Route>, request: &RequestState) -> Vec<Line<'static>> {
+pub fn summary_lines(route: Option<&Route>) -> Vec<Line<'static>> {
     match route {
         None => vec![Line::from(vec![Span::styled(
             "(no route selected)",
             Style::default().fg(Color::DarkGray),
         )])],
         Some(r) => {
-            let mut lines = build_lines(r);
-            append_request_lines(&mut lines, request);
+            let m_fg = method_fg(r.method());
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        r.method().to_string(),
+                        Style::default().fg(m_fg).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::raw(r.path().to_string()),
+                ]),
+                Line::from(""),
+                Line::from(Span::raw(r.summary().to_string())),
+            ]
+        }
+    }
+}
+
+pub fn params_lines(route: Option<&Route>) -> Vec<Line<'static>> {
+    match route {
+        None => vec![Line::from(vec![Span::styled(
+            "(no route selected)",
+            Style::default().fg(Color::DarkGray),
+        )])],
+        Some(r) => {
+            let mut lines = Vec::new();
+            lines.push(Line::from(Span::styled(
+                "Query parameters",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            append_param_lines(&mut lines, r.query_params());
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Body parameters",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            append_param_lines(&mut lines, r.body_params());
             lines
         }
     }
 }
 
-pub fn detail_paragraph(lines: Vec<Line<'static>>, scroll_y: u16) -> Paragraph<'static> {
+pub fn response_lines(request: &RequestState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    append_request_lines(&mut lines, request);
+    lines
+}
+
+pub fn section_paragraph(lines: Vec<Line<'static>>, scroll_y: u16) -> Paragraph<'static> {
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((0, scroll_y))
@@ -33,51 +73,17 @@ pub fn line_count(lines: &[Line], _width: u16) -> u16 {
     lines.len() as u16
 }
 
-fn build_lines(route: &Route) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let m_fg = method_fg(route.method());
-    lines.push(Line::from(vec![
-        Span::raw(route.summary().to_string()),
-        Span::raw(" | "),
-        Span::styled(
-            route.method().to_string(),
-            Style::default().fg(m_fg).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::raw(route.path().to_string()),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Query parameters",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    append_param_lines(&mut lines, route.query_params());
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Body parameters",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    append_param_lines(&mut lines, route.body_params());
-    lines
-}
-
 fn append_request_lines(out: &mut Vec<Line<'static>>, request: &RequestState) {
-    out.push(Line::from(""));
-    out.push(Line::from(Span::styled(
-        "Response",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-
     match request {
         RequestState::Idle => {
             out.push(Line::from(vec![Span::styled(
-                "  Press Enter to send a request to localhost:8080",
+                "Press Enter to send a request to localhost:8080",
                 Style::default().fg(Color::DarkGray),
             )]));
         }
         RequestState::Loading => {
             out.push(Line::from(vec![Span::styled(
-                "  Sending request…",
+                "Sending request…",
                 Style::default().fg(Color::Yellow),
             )]));
         }
@@ -93,7 +99,7 @@ fn append_request_lines(out: &mut Vec<Line<'static>>, request: &RequestState) {
                     Color::Red
                 };
                 out.push(Line::from(vec![
-                    Span::raw("  Status: "),
+                    Span::raw("Status: "),
                     Span::styled(
                         status.to_string(),
                         Style::default()
@@ -110,7 +116,7 @@ fn append_request_lines(out: &mut Vec<Line<'static>>, request: &RequestState) {
             }
             RequestOutcome::Error(msg) => {
                 out.push(Line::from(vec![Span::styled(
-                    format!("  Error: {msg}"),
+                    format!("Error: {msg}"),
                     Style::default().fg(Color::Red),
                 )]));
             }
